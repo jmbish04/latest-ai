@@ -19,7 +19,7 @@ Single Cloudflare Worker (`src/index.ts`), no bindings, no database, no framewor
 
 ## Filtering
 
-- **Provider whitelist**: anthropic, openai, google, meta-llama, mistralai, deepseek, qwen, x-ai, cohere, nvidia
+- **Provider whitelist**: anthropic, openai, google, meta-llama, mistralai, deepseek, qwen, x-ai, z-ai, cohere, nvidia
 - **Recency**: Last 90 days by default
 - **Exclusions**: `:free` wrappers, `:extended` variants, $0/$0 pricing
 

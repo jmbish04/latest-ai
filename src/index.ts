@@ -10,6 +10,7 @@ const PROVIDERS = [
 	'deepseek',
 	'qwen',
 	'x-ai',
+	'z-ai',
 	'cohere',
 	'nvidia',
 ] as const;
@@ -17,6 +18,20 @@ const PROVIDERS = [
 const DEFAULT_DAYS = 90;
 const CACHE_TTL = 21600; // 6 hours in seconds
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/models';
+
+// Flagship families: latest model matching each pattern is always included,
+// regardless of recency cutoff. Patterns match against the part after "provider/".
+const FLAGSHIPS: Record<string, string[]> = {
+	anthropic: ['claude-opus', 'claude-sonnet', 'claude-haiku'],
+	openai: ['gpt-.*-pro', 'gpt-(?!.*(?:pro|mini|codex|chat|audio))[\\d.]+$', 'gpt-.*-mini', 'gpt-.*-codex(?!-)'],
+	google: ['gemini-.*-pro-preview$', 'gemini-.*-flash(?!.*lite)(?!.*image)-preview$', 'gemini-.*-flash-lite'],
+	mistralai: ['mistral-large', 'mistral-medium', 'mistral-small(?!.*creative)', 'ministral-\\d+b'],
+	deepseek: ['deepseek-v3', 'deepseek-r1(?!-)'],
+	'meta-llama': ['llama-4', 'llama-3\\.3', 'llama-3\\.2-.*vision'],
+	'x-ai': ['grok-\\d+(?!.*(?:fast|mini|beta))', 'grok-.*-fast(?!.*beta)'],
+	'z-ai': ['glm-\\d+$', 'glm-.*-flash'],
+	qwen: ['qwen.*-max', 'qwen.*-plus', 'qwen.*-flash(?!.*lite)'],
+};
 
 // --- Types ---
 
@@ -39,9 +54,30 @@ interface FilteredModel {
 	pricing: { input: number; output: number };
 	modality: string;
 	released: string;
+	flagship: boolean;
 }
 
 // --- Fetch & Filter ---
+
+// Find the newest model ID matching each flagship pattern per provider
+function findFlagshipIds(models: OpenRouterModel[]): Set<string> {
+	const ids = new Set<string>();
+	for (const [provider, patterns] of Object.entries(FLAGSHIPS)) {
+		const providerModels = models.filter(
+			(m) => m.id.split('/')[0] === provider && !m.id.includes(':free') && !m.id.includes(':extended')
+		);
+		for (const pattern of patterns) {
+			const re = new RegExp(`^${pattern}`);
+			const matches = providerModels.filter((m) => re.test(m.id.split('/')[1]));
+			if (matches.length > 0) {
+				// Pick the newest
+				matches.sort((a, b) => b.created - a.created);
+				ids.add(matches[0].id);
+			}
+		}
+	}
+	return ids;
+}
 
 async function fetchModels(days: number, providerFilter?: string): Promise<{ models: FilteredModel[]; updated: string }> {
 	const resp = await fetch(OPENROUTER_API, { cf: { cacheTtl: CACHE_TTL } } as RequestInit);
@@ -49,16 +85,18 @@ async function fetchModels(days: number, providerFilter?: string): Promise<{ mod
 
 	const data = (await resp.json()) as { data: OpenRouterModel[] };
 	const cutoff = Date.now() / 1000 - days * 86400;
+	const flagshipIds = findFlagshipIds(data.data);
 
 	const filtered = data.data
 		.filter((m) => {
 			const provider = m.id.split('/')[0];
 			if (!PROVIDERS.includes(provider as (typeof PROVIDERS)[number])) return false;
 			if (providerFilter && provider !== providerFilter) return false;
-			if (m.created < cutoff) return false;
 			if (m.id.includes(':free')) return false;
 			if (m.id.includes(':extended')) return false;
 			if (m.pricing.prompt === '0' && m.pricing.completion === '0') return false;
+			// Include if within recency window OR is a flagship
+			if (m.created < cutoff && !flagshipIds.has(m.id)) return false;
 			return true;
 		})
 		.map((m) => ({
@@ -73,9 +111,12 @@ async function fetchModels(days: number, providerFilter?: string): Promise<{ mod
 			},
 			modality: m.architecture?.modality ?? 'text->text',
 			released: new Date(m.created * 1000).toISOString().split('T')[0],
+			flagship: flagshipIds.has(m.id),
 		}))
 		.sort((a, b) => {
 			if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
+			// Flagships first, then by price descending within each group
+			if (a.flagship !== b.flagship) return a.flagship ? -1 : 1;
 			return b.pricing.input - a.pricing.input;
 		});
 
@@ -104,6 +145,7 @@ function renderText(models: FilteredModel[], updated: string, days: number): str
 		`# Source: OpenRouter API | Updated: ${updated}`,
 		`# Filter: ${PROVIDERS.length} providers, last ${days} days | Total: ${models.length} models`,
 		`# URL: https://models.flared.au/llms.txt`,
+		`# >>> = current flagship model for this provider tier`,
 		'',
 	];
 
@@ -113,7 +155,7 @@ function renderText(models: FilteredModel[], updated: string, days: number): str
 			currentProvider = m.provider;
 			lines.push(`## ${currentProvider}`, '');
 		}
-		lines.push(m.id);
+		lines.push(m.flagship ? `>>> ${m.id}` : `    ${m.id}`);
 		const ctx = formatTokens(m.context_length);
 		const out = m.max_output ? ` | Output: ${formatTokens(m.max_output)}` : '';
 		lines.push(`  Context: ${ctx}${out}`);
@@ -150,7 +192,8 @@ function renderHTML(models: FilteredModel[], updated: string, days: number): str
 		}
 		const ctx = formatTokens(m.context_length);
 		const out = m.max_output ? formatTokens(m.max_output) : '-';
-		rows += `<tr>
+		const cls = m.flagship ? ' class="flagship"' : '';
+		rows += `<tr${cls}>
 <td class="id">${esc(m.id)}</td>
 <td>${ctx}</td>
 <td>${out}</td>
@@ -176,6 +219,8 @@ th{text-align:left;padding:.5rem .75rem;border-bottom:1px solid #262626;color:#a
 td{padding:.4rem .75rem;border-bottom:1px solid #171717}
 .provider{font-weight:700;color:#fff;padding-top:1.2rem;font-size:15px;border-bottom:1px solid #262626}
 .id{color:#60a5fa}
+.flagship td{background:#111;color:#fff}
+.flagship .id{color:#93c5fd}
 tr:hover td:not(.provider){background:#111}
 </style>
 </head>
