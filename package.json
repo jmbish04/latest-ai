@@ -1,8 +1,7 @@
 {
   "name": "latest-ai",
   "version": "1.0.0",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
